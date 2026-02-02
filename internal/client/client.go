@@ -22,6 +22,7 @@ type Config struct {
 	Events            []string
 	SuccessAssertions []assertion.Assertion
 	FailureAssertions []assertion.Assertion
+	Timeout           time.Duration
 }
 
 type exitError struct {
@@ -66,8 +67,14 @@ func Run(ctx context.Context, cfg Config) error {
 			continue
 		}
 
-		err = readLoop(ctx, conn, stdout, logger, cfg.SuccessAssertions, cfg.FailureAssertions)
+		err = readLoop(ctx, conn, stdout, logger, cfg.SuccessAssertions, cfg.FailureAssertions, cfg.Timeout)
 		_ = conn.Close()
+		if err != nil {
+			var exitErr interface{ ExitCode() int }
+			if errors.As(err, &exitErr) {
+				return err
+			}
+		}
 		if err != nil && !errors.Is(err, context.Canceled) {
 			logger.Printf("disconnected: %v", err)
 		} else {
@@ -76,7 +83,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 }
 
-func readLoop(ctx context.Context, conn *websocket.Conn, stdout *bufio.Writer, logger *log.Logger, successAssertions []assertion.Assertion, failureAssertions []assertion.Assertion) error {
+func readLoop(ctx context.Context, conn *websocket.Conn, stdout *bufio.Writer, logger *log.Logger, successAssertions []assertion.Assertion, failureAssertions []assertion.Assertion, timeout time.Duration) error {
 	done := make(chan error, 1)
 	go func() {
 		for {
@@ -85,20 +92,6 @@ func readLoop(ctx context.Context, conn *websocket.Conn, stdout *bufio.Writer, l
 				done <- err
 				return
 			}
-			if !json.Valid(message) {
-				logger.Printf("invalid json from server: %s", string(message))
-				continue
-			}
-
-			if matchesAssertions(message, successAssertions) {
-				done <- exitError{code: 0}
-				return
-			}
-			if matchesAssertions(message, failureAssertions) {
-				done <- exitError{code: 1}
-				return
-			}
-
 			if _, err := stdout.Write(message); err != nil {
 				done <- err
 				return
@@ -111,14 +104,37 @@ func readLoop(ctx context.Context, conn *websocket.Conn, stdout *bufio.Writer, l
 				done <- err
 				return
 			}
+
+			if !json.Valid(message) {
+				logger.Printf("invalid json from server: %s", string(message))
+			}
+
+			if matchesAssertions(message, successAssertions) {
+				done <- exitError{code: 0}
+				return
+			}
+			if matchesAssertions(message, failureAssertions) {
+				done <- exitError{code: 1}
+				return
+			}
 		}
 	}()
+
+	var timeoutCh <-chan time.Time
+	var timer *time.Timer
+	if timeout > 0 {
+		timer = time.NewTimer(timeout)
+		defer timer.Stop()
+		timeoutCh = timer.C
+	}
 
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-done:
 		return err
+	case <-timeoutCh:
+		return exitError{code: 124}
 	}
 }
 

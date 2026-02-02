@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/kehao95/gh-pulse/internal/assertion"
 	"github.com/kehao95/gh-pulse/internal/client"
@@ -81,6 +82,7 @@ func main() {
 	var events []string
 	var successOn []string
 	var failureOn []string
+	var timeoutSeconds int
 	streamCmd := &cobra.Command{
 		Use:   "stream",
 		Short: "Connect to the WebSocket stream",
@@ -93,6 +95,7 @@ func main() {
 			if err != nil {
 				return err
 			}
+			timeout := time.Duration(timeoutSeconds) * time.Second
 
 			return runWithSignals(func(ctx context.Context) error {
 				err := client.Run(ctx, client.Config{
@@ -100,6 +103,7 @@ func main() {
 					Events:            events,
 					SuccessAssertions: successAssertions,
 					FailureAssertions: failureAssertions,
+					Timeout:           timeout,
 				})
 				if errors.Is(err, context.Canceled) {
 					return nil
@@ -112,6 +116,7 @@ func main() {
 	streamCmd.Flags().StringArrayVar(&events, "event", nil, "Subscribe to GitHub event types")
 	streamCmd.Flags().StringArrayVar(&successOn, "success-on", nil, "Exit 0 when assertion matches")
 	streamCmd.Flags().StringArrayVar(&failureOn, "failure-on", nil, "Exit 1 when assertion matches")
+	streamCmd.Flags().IntVar(&timeoutSeconds, "timeout", 0, "Exit 124 after timeout in seconds (0 = no timeout)")
 
 	rootCmd.AddCommand(serveCmd, streamCmd)
 
