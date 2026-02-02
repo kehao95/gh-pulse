@@ -2,10 +2,7 @@ module github.com/kehao95/gh-pulse
 
 go 1.25.6
 
-require (
-	github.com/gorilla/websocket v1.5.3
-	github.com/spf13/cobra v1.10.2
-)
+require github.com/spf13/cobra v1.10.2
 
 require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

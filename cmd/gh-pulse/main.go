@@ -11,7 +11,6 @@ import (
 
 	"github.com/kehao95/gh-pulse/internal/assertion"
 	"github.com/kehao95/gh-pulse/internal/client"
-	"github.com/kehao95/gh-pulse/internal/server"
 	"github.com/spf13/cobra"
 )
 
@@ -59,38 +58,22 @@ func runWithSignals(run func(context.Context) error) error {
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "gh-pulse",
-		Short: "Bridge GitHub webhooks to local CLI via WebSocket",
+		Short: "Stream GitHub webhooks to your CLI via SSE",
 	}
 
-	var port int
-	serveCmd := &cobra.Command{
-		Use:   "serve",
-		Short: "Start the webhook server",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runWithSignals(func(ctx context.Context) error {
-				err := server.Run(ctx, server.Config{Port: port})
-				if errors.Is(err, context.Canceled) {
-					return nil
-				}
-				return err
-			})
-		},
-	}
-	serveCmd.Flags().IntVar(&port, "port", 8080, "Port to listen on")
-
-	var serverURL string
+	var streamURL string
 	var events []string
 	var successOn []string
 	var failureOn []string
 	var timeoutSeconds int
-	var captureServerURL string
+	var captureURL string
 	var captureEvents []string
 	var captureSuccessOn []string
 	var captureFailureOn []string
 	var captureTimeoutSeconds int
 	streamCmd := &cobra.Command{
 		Use:   "stream",
-		Short: "Connect to the WebSocket stream",
+		Short: "Connect to the smee.io SSE stream",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			successAssertions, err := assertion.ParseAssertions(successOn, 0)
 			if err != nil {
@@ -104,7 +87,7 @@ func main() {
 
 			return runWithSignals(func(ctx context.Context) error {
 				err := client.Run(ctx, client.Config{
-					ServerURL:         serverURL,
+					URL:               streamURL,
 					Events:            events,
 					SuccessAssertions: successAssertions,
 					FailureAssertions: failureAssertions,
@@ -117,11 +100,12 @@ func main() {
 			})
 		},
 	}
-	streamCmd.Flags().StringVar(&serverURL, "server", "ws://localhost:8080/ws", "WebSocket server URL")
+	streamCmd.Flags().StringVar(&streamURL, "url", "", "smee.io channel URL")
 	streamCmd.Flags().StringArrayVar(&events, "event", nil, "Subscribe to GitHub event types")
 	streamCmd.Flags().StringArrayVar(&successOn, "success-on", nil, "Exit 0 when assertion matches")
 	streamCmd.Flags().StringArrayVar(&failureOn, "failure-on", nil, "Exit 1 when assertion matches")
 	streamCmd.Flags().IntVar(&timeoutSeconds, "timeout", 0, "Exit 124 after timeout in seconds (0 = no timeout)")
+	_ = streamCmd.MarkFlagRequired("url")
 
 	captureCmd := &cobra.Command{
 		Use:   "capture",
@@ -142,7 +126,7 @@ func main() {
 
 			return runWithSignals(func(ctx context.Context) error {
 				err := client.RunCapture(ctx, client.Config{
-					ServerURL:         captureServerURL,
+					URL:               captureURL,
 					Events:            captureEvents,
 					SuccessAssertions: successAssertions,
 					FailureAssertions: failureAssertions,
@@ -155,13 +139,14 @@ func main() {
 			})
 		},
 	}
-	captureCmd.Flags().StringVar(&captureServerURL, "server", "ws://localhost:8080/ws", "WebSocket server URL")
+	captureCmd.Flags().StringVar(&captureURL, "url", "", "smee.io channel URL")
 	captureCmd.Flags().StringArrayVar(&captureEvents, "event", nil, "Subscribe to GitHub event types")
 	captureCmd.Flags().StringArrayVar(&captureSuccessOn, "success-on", nil, "Exit 0 when assertion matches")
 	captureCmd.Flags().StringArrayVar(&captureFailureOn, "failure-on", nil, "Exit 1 when assertion matches")
 	captureCmd.Flags().IntVar(&captureTimeoutSeconds, "timeout", 0, "Exit 124 after timeout in seconds (0 = no timeout)")
+	_ = captureCmd.MarkFlagRequired("url")
 
-	rootCmd.AddCommand(serveCmd, streamCmd, captureCmd)
+	rootCmd.AddCommand(streamCmd, captureCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		var exitErr interface{ ExitCode() int }

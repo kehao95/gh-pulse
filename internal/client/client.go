@@ -13,12 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/kehao95/gh-pulse/internal/assertion"
+	"github.com/kehao95/gh-pulse/internal/message"
+	"github.com/kehao95/gh-pulse/internal/sse"
 )
 
 type Config struct {
-	ServerURL         string
+	URL               string
 	Events            []string
 	SuccessAssertions []assertion.Assertion
 	FailureAssertions []assertion.Assertion
@@ -45,159 +46,89 @@ func (e exitError) ExitCode() int {
 func Run(ctx context.Context, cfg Config) error {
 	logger := log.New(os.Stderr, "", log.LstdFlags)
 	stdout := bufio.NewWriter(os.Stdout)
-	backoff := time.Second
-
-	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		logger.Printf("connecting to %s", cfg.ServerURL)
-		conn, _, err := websocket.DefaultDialer.DialContext(ctx, cfg.ServerURL, nil)
-		if err != nil {
-			logger.Printf("connect failed: %v", err)
-			wait(ctx, backoff)
-			backoff = nextBackoff(backoff)
-			continue
-		}
-
-		logger.Printf("connected to %s", cfg.ServerURL)
-		backoff = time.Second
-
-		if err := sendSubscribe(conn, cfg.Events); err != nil {
-			logger.Printf("subscribe failed: %v", err)
-			_ = conn.Close()
-			wait(ctx, backoff)
-			backoff = nextBackoff(backoff)
-			continue
-		}
-
-		err = readLoop(ctx, conn, stdout, logger, cfg.SuccessAssertions, cfg.FailureAssertions, cfg.Timeout)
-		_ = conn.Close()
-		if err != nil {
-			var exitErr interface{ ExitCode() int }
-			if errors.As(err, &exitErr) {
+	client := sse.NewClient(cfg.URL, logger)
+	return runWithTimeout(ctx, cfg.Timeout, func(runCtx context.Context) error {
+		return client.Run(runCtx, func(msg message.EventMessage) error {
+			if !eventAllowed(cfg.Events, msg.Event) {
+				return nil
+			}
+			encoded, err := json.Marshal(msg)
+			if err != nil {
+				logger.Printf("failed to encode event: %v", err)
+				return nil
+			}
+			if _, err := stdout.Write(encoded); err != nil {
 				return err
 			}
-		}
-		if err != nil && !errors.Is(err, context.Canceled) {
-			logger.Printf("disconnected: %v", err)
-		} else {
-			logger.Printf("disconnected")
-		}
-	}
+			if err := stdout.WriteByte('\n'); err != nil {
+				return err
+			}
+			if err := stdout.Flush(); err != nil {
+				return err
+			}
+
+			if matchesAssertions(encoded, cfg.SuccessAssertions) {
+				return exitError{code: 0}
+			}
+			if matchesAssertions(encoded, cfg.FailureAssertions) {
+				return exitError{code: 1}
+			}
+			return nil
+		})
+	})
 }
 
 func RunCapture(ctx context.Context, cfg Config) error {
 	logger := log.New(os.Stderr, "", log.LstdFlags)
 	stdout := bufio.NewWriter(os.Stdout)
-	backoff := time.Second
-
 	buffer := make([][]byte, 0, 128)
 	var bufferBytes int64
 	warned := false
+	client := sse.NewClient(cfg.URL, logger)
 
-	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		logger.Printf("connecting to %s", cfg.ServerURL)
-		conn, _, err := websocket.DefaultDialer.DialContext(ctx, cfg.ServerURL, nil)
-		if err != nil {
-			logger.Printf("connect failed: %v", err)
-			wait(ctx, backoff)
-			backoff = nextBackoff(backoff)
-			continue
-		}
-
-		logger.Printf("connected to %s", cfg.ServerURL)
-		backoff = time.Second
-
-		if err := sendSubscribe(conn, cfg.Events); err != nil {
-			logger.Printf("subscribe failed: %v", err)
-			_ = conn.Close()
-			wait(ctx, backoff)
-			backoff = nextBackoff(backoff)
-			continue
-		}
-
-		err = readLoopCapture(ctx, conn, logger, &buffer, &bufferBytes, &warned, cfg.SuccessAssertions, cfg.FailureAssertions, cfg.Timeout)
-		_ = conn.Close()
-		if err != nil {
-			var exitErr interface{ ExitCode() int }
-			if errors.As(err, &exitErr) {
-				if dumpErr := dumpBuffer(stdout, buffer); dumpErr != nil {
-					return dumpErr
-				}
-				return err
+	err := runWithTimeout(ctx, cfg.Timeout, func(runCtx context.Context) error {
+		return client.Run(runCtx, func(msg message.EventMessage) error {
+			if !eventAllowed(cfg.Events, msg.Event) {
+				return nil
 			}
-			var fatalErr fatalError
-			if errors.As(err, &fatalErr) {
-				return fatalErr
-			}
-		}
-		if err != nil && !errors.Is(err, context.Canceled) {
-			logger.Printf("disconnected: %v", err)
-		} else {
-			logger.Printf("disconnected")
-		}
-	}
-}
-
-func readLoop(ctx context.Context, conn *websocket.Conn, stdout *bufio.Writer, logger *log.Logger, successAssertions []assertion.Assertion, failureAssertions []assertion.Assertion, timeout time.Duration) error {
-	done := make(chan error, 1)
-	go func() {
-		for {
-			_, message, err := conn.ReadMessage()
+			encoded, err := json.Marshal(msg)
 			if err != nil {
-				done <- err
-				return
+				logger.Printf("failed to encode event: %v", err)
+				return nil
 			}
-			if _, err := stdout.Write(message); err != nil {
-				done <- err
-				return
+			buffer = append(buffer, encoded)
+			bufferBytes += int64(len(encoded))
+			if !warned && bufferBytes >= warnBufferBytes {
+				logger.Printf("capture buffer exceeded 100MB")
+				warned = true
 			}
-			if err := stdout.WriteByte('\n'); err != nil {
-				done <- err
-				return
-			}
-			if err := stdout.Flush(); err != nil {
-				done <- err
-				return
+			if bufferBytes >= maxBufferBytes {
+				return fatalError{err: fmt.Errorf("capture buffer exceeded 500MB")}
 			}
 
-			if !json.Valid(message) {
-				logger.Printf("invalid json from server: %s", string(message))
+			if matchesAssertions(encoded, cfg.SuccessAssertions) {
+				return exitError{code: 0}
 			}
-
-			if matchesAssertions(message, successAssertions) {
-				done <- exitError{code: 0}
-				return
+			if matchesAssertions(encoded, cfg.FailureAssertions) {
+				return exitError{code: 1}
 			}
-			if matchesAssertions(message, failureAssertions) {
-				done <- exitError{code: 1}
-				return
+			return nil
+		})
+	})
+	if err != nil {
+		var exitErr interface{ ExitCode() int }
+		if errors.As(err, &exitErr) {
+			if dumpErr := dumpBuffer(stdout, buffer); dumpErr != nil {
+				return dumpErr
 			}
+			return err
 		}
-	}()
-
-	var timeoutCh <-chan time.Time
-	var timer *time.Timer
-	if timeout > 0 {
-		timer = time.NewTimer(timeout)
-		defer timer.Stop()
-		timeoutCh = timer.C
+		var fatalErr fatalError
+		if errors.As(err, &fatalErr) {
+			return fatalErr
+		}
 	}
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-done:
-		return err
-	case <-timeoutCh:
-		return exitError{code: 124}
-	}
+	return err
 }
 
 type fatalError struct {
@@ -212,39 +143,13 @@ func (e fatalError) Unwrap() error {
 	return e.err
 }
 
-func readLoopCapture(ctx context.Context, conn *websocket.Conn, logger *log.Logger, buffer *[][]byte, bufferBytes *int64, warned *bool, successAssertions []assertion.Assertion, failureAssertions []assertion.Assertion, timeout time.Duration) error {
+func runWithTimeout(ctx context.Context, timeout time.Duration, run func(context.Context) error) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	done := make(chan error, 1)
 	go func() {
-		for {
-			_, message, err := conn.ReadMessage()
-			if err != nil {
-				done <- err
-				return
-			}
-			*buffer = append(*buffer, message)
-			*bufferBytes += int64(len(message))
-			if !*warned && *bufferBytes >= warnBufferBytes {
-				logger.Printf("capture buffer exceeded 100MB")
-				*warned = true
-			}
-			if *bufferBytes >= maxBufferBytes {
-				done <- fatalError{err: fmt.Errorf("capture buffer exceeded 500MB")}
-				return
-			}
-
-			if !json.Valid(message) {
-				logger.Printf("invalid json from server: %s", string(message))
-			}
-
-			if matchesAssertions(message, successAssertions) {
-				done <- exitError{code: 0}
-				return
-			}
-			if matchesAssertions(message, failureAssertions) {
-				done <- exitError{code: 1}
-				return
-			}
-		}
+		done <- run(runCtx)
 	}()
 
 	var timeoutCh <-chan time.Time
@@ -257,12 +162,13 @@ func readLoopCapture(ctx context.Context, conn *websocket.Conn, logger *log.Logg
 
 	select {
 	case <-ctx.Done():
-		_ = conn.Close()
+		cancel()
+		<-done
 		return ctx.Err()
 	case err := <-done:
 		return err
 	case <-timeoutCh:
-		_ = conn.Close()
+		cancel()
 		<-done
 		return exitError{code: 124}
 	}
@@ -353,39 +259,14 @@ func stringifyJSON(value interface{}) string {
 	}
 }
 
-func sendSubscribe(conn *websocket.Conn, events []string) error {
-	if events == nil {
-		events = []string{}
+func eventAllowed(events []string, candidate string) bool {
+	if len(events) == 0 {
+		return true
 	}
-	msg := subscribeMessage{
-		Type:   "subscribe",
-		Events: events,
+	for _, event := range events {
+		if event == candidate {
+			return true
+		}
 	}
-	encoded, err := json.Marshal(msg)
-	if err != nil {
-		return err
-	}
-	return conn.WriteMessage(websocket.TextMessage, encoded)
-}
-
-type subscribeMessage struct {
-	Type   string   `json:"type"`
-	Events []string `json:"events"`
-}
-
-func wait(ctx context.Context, d time.Duration) {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-	case <-timer.C:
-	}
-}
-
-func nextBackoff(current time.Duration) time.Duration {
-	next := current * 2
-	if next > 30*time.Second {
-		return 30 * time.Second
-	}
-	return next
+	return false
 }
