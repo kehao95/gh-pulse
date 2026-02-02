@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +27,22 @@ func (e exitError) Error() string {
 
 func (e exitError) ExitCode() int {
 	return e.code
+}
+
+type usageError struct {
+	cmd *cobra.Command
+	err error
+}
+
+func (e usageError) Error() string {
+	return e.err.Error()
+}
+
+func usageErr(cmd *cobra.Command, err error) error {
+	if err == nil {
+		return nil
+	}
+	return usageError{cmd: cmd, err: err}
 }
 
 func runWithSignals(run func(context.Context) error) error {
@@ -68,17 +85,26 @@ into scripts, filters, and assertion checks. Use stream for live output or
 capture to buffer events until an exit condition is met.`,
 	}
 	rootCmd.Version = version
+	rootCmd.SilenceUsage = true
+	rootCmd.SilenceErrors = true
+	rootCmd.SetOut(os.Stdout)
+	rootCmd.SetErr(os.Stderr)
+	rootCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return usageErr(cmd, err)
+	})
 
 	var streamURL string
 	var events []string
 	var successOn []string
 	var failureOn []string
 	var timeoutSeconds int
+	var quiet bool
 	var captureURL string
 	var captureEvents []string
 	var captureSuccessOn []string
 	var captureFailureOn []string
 	var captureTimeoutSeconds int
+	rootCmd.PersistentFlags().BoolVar(&quiet, "quiet", false, "suppress non-JSON log output")
 	streamCmd := &cobra.Command{
 		Use:   "stream --url <smee-channel>",
 		Short: "Stream GitHub webhooks as JSONL to stdout",
@@ -90,6 +116,7 @@ Connection status and errors go to stderr.
 Exit codes:
   0   - Success assertion matched (--success-on)
   1   - Failure assertion matched (--failure-on)
+  2   - Configuration error (invalid flag values)
   124 - Timeout reached (--timeout)
   130 - Interrupted (Ctrl+C)`,
 		Example: `  # Stream all events
@@ -100,6 +127,15 @@ Exit codes:
 
   # Filter to only pull_request events
   gh-pulse stream --url https://smee.io/my-channel --event pull_request`,
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if streamURL == "" {
+				return usageErr(cmd, fmt.Errorf("missing required flag: --url"))
+			}
+			if err := validateEvents(events); err != nil {
+				return usageErr(cmd, err)
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			successAssertions, err := assertion.ParseAssertions(successOn, 0)
 			if err != nil {
@@ -118,8 +154,13 @@ Exit codes:
 					SuccessAssertions: successAssertions,
 					FailureAssertions: failureAssertions,
 					Timeout:           timeout,
+					Quiet:             quiet,
 				})
 				if errors.Is(err, context.Canceled) {
+					return nil
+				}
+				var exitErr interface{ ExitCode() int }
+				if errors.As(err, &exitErr) && exitErr.ExitCode() == 0 {
 					return nil
 				}
 				return err
@@ -131,7 +172,6 @@ Exit codes:
 	streamCmd.Flags().StringArrayVar(&successOn, "success-on", nil, "exit 0 when JSON path matches (e.g., 'event=push')")
 	streamCmd.Flags().StringArrayVar(&failureOn, "failure-on", nil, "exit 1 when JSON path matches")
 	streamCmd.Flags().IntVar(&timeoutSeconds, "timeout", 0, "exit 124 after N seconds (0 = no timeout)")
-	_ = streamCmd.MarkFlagRequired("url")
 
 	captureCmd := &cobra.Command{
 		Use:   "capture --url <smee-channel>",
@@ -144,6 +184,7 @@ Connection status and errors go to stderr.
 Exit codes:
   0   - Success assertion matched (--success-on)
   1   - Failure assertion matched (--failure-on)
+  2   - Configuration error (invalid flag values)
   124 - Timeout reached (--timeout)
   130 - Interrupted (Ctrl+C)`,
 		Example: `  # Capture until a push event arrives
@@ -154,10 +195,19 @@ Exit codes:
 
   # Fail when a workflow_run event is received
   gh-pulse capture --url https://smee.io/my-channel --failure-on "event=workflow_run" --timeout 120`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(captureSuccessOn) == 0 && len(captureFailureOn) == 0 && captureTimeoutSeconds == 0 {
-				return fmt.Errorf("capture mode requires at least one exit condition (--success-on, --failure-on, or --timeout)")
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if captureURL == "" {
+				return usageErr(cmd, fmt.Errorf("missing required flag: --url"))
 			}
+			if err := validateEvents(captureEvents); err != nil {
+				return usageErr(cmd, err)
+			}
+			if len(captureSuccessOn) == 0 && len(captureFailureOn) == 0 && captureTimeoutSeconds == 0 {
+				return usageErr(cmd, fmt.Errorf("capture mode requires at least one exit condition (--success-on, --failure-on, or --timeout)"))
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
 			successAssertions, err := assertion.ParseAssertions(captureSuccessOn, 0)
 			if err != nil {
 				return err
@@ -175,8 +225,13 @@ Exit codes:
 					SuccessAssertions: successAssertions,
 					FailureAssertions: failureAssertions,
 					Timeout:           timeout,
+					Quiet:             quiet,
 				})
 				if errors.Is(err, context.Canceled) {
+					return nil
+				}
+				var exitErr interface{ ExitCode() int }
+				if errors.As(err, &exitErr) && exitErr.ExitCode() == 0 {
 					return nil
 				}
 				return err
@@ -188,15 +243,34 @@ Exit codes:
 	captureCmd.Flags().StringArrayVar(&captureSuccessOn, "success-on", nil, "exit 0 when JSON path matches (e.g., 'event=push')")
 	captureCmd.Flags().StringArrayVar(&captureFailureOn, "failure-on", nil, "exit 1 when JSON path matches")
 	captureCmd.Flags().IntVar(&captureTimeoutSeconds, "timeout", 0, "exit 124 after N seconds (0 = no timeout)")
-	_ = captureCmd.MarkFlagRequired("url")
 
 	rootCmd.AddCommand(streamCmd, captureCmd)
 
 	if err := rootCmd.Execute(); err != nil {
+		var usageErr usageError
+		if errors.As(err, &usageErr) {
+			fmt.Fprintln(os.Stderr, usageErr.Error())
+			usageErr.cmd.SetOut(os.Stderr)
+			_ = usageErr.cmd.Usage()
+			os.Exit(1)
+		}
 		var exitErr interface{ ExitCode() int }
 		if errors.As(err, &exitErr) {
+			if exitErr.ExitCode() == 2 {
+				fmt.Fprintln(os.Stderr, err)
+			}
 			os.Exit(exitErr.ExitCode())
 		}
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func validateEvents(events []string) error {
+	for _, event := range events {
+		if strings.TrimSpace(event) == "" {
+			return fmt.Errorf("--event must be non-empty")
+		}
+	}
+	return nil
 }

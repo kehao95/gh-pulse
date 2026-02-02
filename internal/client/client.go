@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -24,6 +25,7 @@ type Config struct {
 	SuccessAssertions []assertion.Assertion
 	FailureAssertions []assertion.Assertion
 	Timeout           time.Duration
+	Quiet             bool
 }
 
 const (
@@ -43,8 +45,40 @@ func (e exitError) ExitCode() int {
 	return e.code
 }
 
+type configError struct {
+	err error
+}
+
+func (e configError) Error() string {
+	return e.err.Error()
+}
+
+func (e configError) ExitCode() int {
+	return 2
+}
+
+func validateURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return configError{err: fmt.Errorf("invalid URL: %v", err)}
+	}
+	if parsed.Scheme == "" {
+		return configError{err: fmt.Errorf("invalid URL: missing scheme (expected https://...)")}
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return configError{err: fmt.Errorf("invalid URL: unsupported scheme %q (expected https://...)", parsed.Scheme)}
+	}
+	return nil
+}
+
 func Run(ctx context.Context, cfg Config) error {
-	logger := log.New(os.Stderr, "", log.LstdFlags)
+	if err := validateURL(cfg.URL); err != nil {
+		return err
+	}
+	var logger *log.Logger
+	if !cfg.Quiet {
+		logger = log.New(os.Stderr, "", log.LstdFlags)
+	}
 	stdout := bufio.NewWriter(os.Stdout)
 	client := sse.NewClient(cfg.URL, logger)
 	return runWithTimeout(ctx, cfg.Timeout, func(runCtx context.Context) error {
@@ -54,7 +88,9 @@ func Run(ctx context.Context, cfg Config) error {
 			}
 			encoded, err := json.Marshal(msg)
 			if err != nil {
-				logger.Printf("failed to encode event: %v", err)
+				if logger != nil {
+					logger.Printf("failed to encode event: %v", err)
+				}
 				return nil
 			}
 			if _, err := stdout.Write(encoded); err != nil {
@@ -79,7 +115,13 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 func RunCapture(ctx context.Context, cfg Config) error {
-	logger := log.New(os.Stderr, "", log.LstdFlags)
+	if err := validateURL(cfg.URL); err != nil {
+		return err
+	}
+	var logger *log.Logger
+	if !cfg.Quiet {
+		logger = log.New(os.Stderr, "", log.LstdFlags)
+	}
 	stdout := bufio.NewWriter(os.Stdout)
 	buffer := make([][]byte, 0, 128)
 	var bufferBytes int64
@@ -93,13 +135,17 @@ func RunCapture(ctx context.Context, cfg Config) error {
 			}
 			encoded, err := json.Marshal(msg)
 			if err != nil {
-				logger.Printf("failed to encode event: %v", err)
+				if logger != nil {
+					logger.Printf("failed to encode event: %v", err)
+				}
 				return nil
 			}
 			buffer = append(buffer, encoded)
 			bufferBytes += int64(len(encoded))
 			if !warned && bufferBytes >= warnBufferBytes {
-				logger.Printf("capture buffer exceeded 100MB")
+				if logger != nil {
+					logger.Printf("capture buffer exceeded 100MB")
+				}
 				warned = true
 			}
 			if bufferBytes >= maxBufferBytes {
