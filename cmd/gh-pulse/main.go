@@ -14,6 +14,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var version = "dev"
+
 type exitError struct {
 	code int
 }
@@ -42,7 +44,7 @@ func runWithSignals(run func(context.Context) error) error {
 	select {
 	case sig := <-sigCh:
 		cancel()
-		_ = <-errCh
+		<-errCh
 		if sig == os.Interrupt {
 			return exitError{code: 130}
 		}
@@ -58,8 +60,14 @@ func runWithSignals(run func(context.Context) error) error {
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "gh-pulse",
-		Short: "Stream GitHub webhooks to your CLI via SSE",
+		Short: "Stream and capture GitHub webhook events from smee.io",
+		Long: `gh-pulse connects to a smee.io channel and streams GitHub webhook events.
+
+Events are emitted as JSON Lines (one event per line) so you can pipe them
+into scripts, filters, and assertion checks. Use stream for live output or
+capture to buffer events until an exit condition is met.`,
 	}
+	rootCmd.Version = version
 
 	var streamURL string
 	var events []string
@@ -72,8 +80,26 @@ func main() {
 	var captureFailureOn []string
 	var captureTimeoutSeconds int
 	streamCmd := &cobra.Command{
-		Use:   "stream",
-		Short: "Connect to the smee.io SSE stream",
+		Use:   "stream --url <smee-channel>",
+		Short: "Stream GitHub webhooks as JSONL to stdout",
+		Long: `Connect to a smee.io channel and output GitHub webhook events as JSONL.
+
+Each webhook received is printed as a single JSON line to stdout.
+Connection status and errors go to stderr.
+
+Exit codes:
+  0   - Success assertion matched (--success-on)
+  1   - Failure assertion matched (--failure-on)
+  124 - Timeout reached (--timeout)
+  130 - Interrupted (Ctrl+C)`,
+		Example: `  # Stream all events
+  gh-pulse stream --url https://smee.io/my-channel
+
+  # Wait for push, exit 0 when received
+  gh-pulse stream --url https://smee.io/my-channel --success-on "event=push" --timeout 60
+
+  # Filter to only pull_request events
+  gh-pulse stream --url https://smee.io/my-channel --event pull_request`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			successAssertions, err := assertion.ParseAssertions(successOn, 0)
 			if err != nil {
@@ -100,16 +126,34 @@ func main() {
 			})
 		},
 	}
-	streamCmd.Flags().StringVar(&streamURL, "url", "", "smee.io channel URL")
-	streamCmd.Flags().StringArrayVar(&events, "event", nil, "Subscribe to GitHub event types")
-	streamCmd.Flags().StringArrayVar(&successOn, "success-on", nil, "Exit 0 when assertion matches")
-	streamCmd.Flags().StringArrayVar(&failureOn, "failure-on", nil, "Exit 1 when assertion matches")
-	streamCmd.Flags().IntVar(&timeoutSeconds, "timeout", 0, "Exit 124 after timeout in seconds (0 = no timeout)")
+	streamCmd.Flags().StringVar(&streamURL, "url", "", "smee.io channel URL (required)")
+	streamCmd.Flags().StringArrayVar(&events, "event", nil, "filter by GitHub event type (can repeat)")
+	streamCmd.Flags().StringArrayVar(&successOn, "success-on", nil, "exit 0 when JSON path matches (e.g., 'event=push')")
+	streamCmd.Flags().StringArrayVar(&failureOn, "failure-on", nil, "exit 1 when JSON path matches")
+	streamCmd.Flags().IntVar(&timeoutSeconds, "timeout", 0, "exit 124 after N seconds (0 = no timeout)")
 	_ = streamCmd.MarkFlagRequired("url")
 
 	captureCmd := &cobra.Command{
-		Use:   "capture",
-		Short: "Buffer events and dump on exit",
+		Use:   "capture --url <smee-channel>",
+		Short: "Buffer GitHub webhooks and dump on exit",
+		Long: `Connect to a smee.io channel and buffer GitHub webhook events.
+
+When an exit condition is met, all buffered events are printed as JSONL to stdout.
+Connection status and errors go to stderr.
+
+Exit codes:
+  0   - Success assertion matched (--success-on)
+  1   - Failure assertion matched (--failure-on)
+  124 - Timeout reached (--timeout)
+  130 - Interrupted (Ctrl+C)`,
+		Example: `  # Capture until a push event arrives
+  gh-pulse capture --url https://smee.io/my-channel --success-on "event=push" --timeout 60
+
+  # Capture pull_request events for 10 seconds
+  gh-pulse capture --url https://smee.io/my-channel --event pull_request --timeout 10
+
+  # Fail when a workflow_run event is received
+  gh-pulse capture --url https://smee.io/my-channel --failure-on "event=workflow_run" --timeout 120`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(captureSuccessOn) == 0 && len(captureFailureOn) == 0 && captureTimeoutSeconds == 0 {
 				return fmt.Errorf("capture mode requires at least one exit condition (--success-on, --failure-on, or --timeout)")
@@ -139,11 +183,11 @@ func main() {
 			})
 		},
 	}
-	captureCmd.Flags().StringVar(&captureURL, "url", "", "smee.io channel URL")
-	captureCmd.Flags().StringArrayVar(&captureEvents, "event", nil, "Subscribe to GitHub event types")
-	captureCmd.Flags().StringArrayVar(&captureSuccessOn, "success-on", nil, "Exit 0 when assertion matches")
-	captureCmd.Flags().StringArrayVar(&captureFailureOn, "failure-on", nil, "Exit 1 when assertion matches")
-	captureCmd.Flags().IntVar(&captureTimeoutSeconds, "timeout", 0, "Exit 124 after timeout in seconds (0 = no timeout)")
+	captureCmd.Flags().StringVar(&captureURL, "url", "", "smee.io channel URL (required)")
+	captureCmd.Flags().StringArrayVar(&captureEvents, "event", nil, "filter by GitHub event type (can repeat)")
+	captureCmd.Flags().StringArrayVar(&captureSuccessOn, "success-on", nil, "exit 0 when JSON path matches (e.g., 'event=push')")
+	captureCmd.Flags().StringArrayVar(&captureFailureOn, "failure-on", nil, "exit 1 when JSON path matches")
+	captureCmd.Flags().IntVar(&captureTimeoutSeconds, "timeout", 0, "exit 124 after N seconds (0 = no timeout)")
 	_ = captureCmd.MarkFlagRequired("url")
 
 	rootCmd.AddCommand(streamCmd, captureCmd)

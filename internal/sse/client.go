@@ -197,9 +197,7 @@ func splitSSELine(line string) (string, string) {
 	}
 	field := line[:idx]
 	value := line[idx+1:]
-	if strings.HasPrefix(value, " ") {
-		value = value[1:]
-	}
+	value = strings.TrimPrefix(value, " ")
 	return field, value
 }
 
