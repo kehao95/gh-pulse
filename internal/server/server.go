@@ -58,7 +58,7 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 
 		select {
-		case hub.broadcast <- encoded:
+		case hub.broadcast <- broadcastMessage{event: event, data: encoded}:
 		default:
 			logger.Printf("broadcast dropped event=%q delivery=%q", event, delivery)
 		}
@@ -83,9 +83,10 @@ func Run(ctx context.Context, cfg Config) error {
 		logger.Printf("ws connected from %s", r.RemoteAddr)
 
 		client := &Client{
-			hub:  hub,
-			conn: conn,
-			send: make(chan []byte, 16),
+			hub:    hub,
+			conn:   conn,
+			send:   make(chan []byte, 16),
+			logger: logger,
 		}
 		hub.register <- client
 

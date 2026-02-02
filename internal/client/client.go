@@ -5,15 +5,35 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/kehao95/gh-pulse/internal/assertion"
 )
 
 type Config struct {
-	ServerURL string
+	ServerURL         string
+	Events            []string
+	SuccessAssertions []assertion.Assertion
+	FailureAssertions []assertion.Assertion
+}
+
+type exitError struct {
+	code int
+}
+
+func (e exitError) Error() string {
+	return fmt.Sprintf("exit with code %d", e.code)
+}
+
+func (e exitError) ExitCode() int {
+	return e.code
 }
 
 func Run(ctx context.Context, cfg Config) error {
@@ -38,7 +58,15 @@ func Run(ctx context.Context, cfg Config) error {
 		logger.Printf("connected to %s", cfg.ServerURL)
 		backoff = time.Second
 
-		err = readLoop(ctx, conn, stdout, logger)
+		if err := sendSubscribe(conn, cfg.Events); err != nil {
+			logger.Printf("subscribe failed: %v", err)
+			_ = conn.Close()
+			wait(ctx, backoff)
+			backoff = nextBackoff(backoff)
+			continue
+		}
+
+		err = readLoop(ctx, conn, stdout, logger, cfg.SuccessAssertions, cfg.FailureAssertions)
 		_ = conn.Close()
 		if err != nil && !errors.Is(err, context.Canceled) {
 			logger.Printf("disconnected: %v", err)
@@ -48,7 +76,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 }
 
-func readLoop(ctx context.Context, conn *websocket.Conn, stdout *bufio.Writer, logger *log.Logger) error {
+func readLoop(ctx context.Context, conn *websocket.Conn, stdout *bufio.Writer, logger *log.Logger, successAssertions []assertion.Assertion, failureAssertions []assertion.Assertion) error {
 	done := make(chan error, 1)
 	go func() {
 		for {
@@ -61,6 +89,16 @@ func readLoop(ctx context.Context, conn *websocket.Conn, stdout *bufio.Writer, l
 				logger.Printf("invalid json from server: %s", string(message))
 				continue
 			}
+
+			if matchesAssertions(message, successAssertions) {
+				done <- exitError{code: 0}
+				return
+			}
+			if matchesAssertions(message, failureAssertions) {
+				done <- exitError{code: 1}
+				return
+			}
+
 			if _, err := stdout.Write(message); err != nil {
 				done <- err
 				return
@@ -82,6 +120,99 @@ func readLoop(ctx context.Context, conn *websocket.Conn, stdout *bufio.Writer, l
 	case err := <-done:
 		return err
 	}
+}
+
+func matchesAssertions(message []byte, assertions []assertion.Assertion) bool {
+	if len(assertions) == 0 {
+		return false
+	}
+
+	var payload interface{}
+	if err := json.Unmarshal(message, &payload); err != nil {
+		return false
+	}
+
+	for _, rule := range assertions {
+		value, ok := valueAtPath(payload, rule.Path)
+		switch rule.Operator {
+		case "exists":
+			if ok {
+				return true
+			}
+		case "eq":
+			if ok && stringifyJSON(value) == rule.Value {
+				return true
+			}
+		case "regex":
+			if ok {
+				re, err := regexp.Compile(rule.Value)
+				if err != nil {
+					continue
+				}
+				if re.MatchString(stringifyJSON(value)) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func valueAtPath(payload interface{}, path string) (interface{}, bool) {
+	current := payload
+	for _, part := range strings.Split(path, ".") {
+		switch node := current.(type) {
+		case map[string]interface{}:
+			child, ok := node[part]
+			if !ok {
+				return nil, false
+			}
+			current = child
+		case []interface{}:
+			idx, err := strconv.Atoi(part)
+			if err != nil || idx < 0 || idx >= len(node) {
+				return nil, false
+			}
+			current = node[idx]
+		default:
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+func stringifyJSON(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	default:
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Sprint(v)
+		}
+		return string(encoded)
+	}
+}
+
+func sendSubscribe(conn *websocket.Conn, events []string) error {
+	if events == nil {
+		events = []string{}
+	}
+	msg := subscribeMessage{
+		Type:   "subscribe",
+		Events: events,
+	}
+	encoded, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	return conn.WriteMessage(websocket.TextMessage, encoded)
+}
+
+type subscribeMessage struct {
+	Type   string   `json:"type"`
+	Events []string `json:"events"`
 }
 
 func wait(ctx context.Context, d time.Duration) {

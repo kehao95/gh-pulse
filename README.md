@@ -17,7 +17,7 @@ go build ./cmd/gh-pulse
 ## Run client
 
 ```bash
-./gh-pulse stream --server ws://localhost:8080/ws
+./gh-pulse stream --server ws://localhost:8080/ws --event push --event pull_request
 ```
 
 ## Send test webhook
@@ -74,7 +74,7 @@ Save the `id` from the response so you can delete it later.
 ### Connect client
 
 ```bash
-./gh-pulse stream --server ws://localhost:8080/ws > events.jsonl 2>status.log
+./gh-pulse stream --server ws://localhost:8080/ws --event push --event pull_request > events.jsonl 2>status.log
 ```
 
 ### Trigger event

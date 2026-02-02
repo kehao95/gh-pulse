@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/kehao95/gh-pulse/internal/assertion"
 	"github.com/kehao95/gh-pulse/internal/client"
 	"github.com/kehao95/gh-pulse/internal/server"
 	"github.com/spf13/cobra"
@@ -77,12 +78,29 @@ func main() {
 	serveCmd.Flags().IntVar(&port, "port", 8080, "Port to listen on")
 
 	var serverURL string
+	var events []string
+	var successOn []string
+	var failureOn []string
 	streamCmd := &cobra.Command{
 		Use:   "stream",
 		Short: "Connect to the WebSocket stream",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			successAssertions, err := assertion.ParseAssertions(successOn, 0)
+			if err != nil {
+				return err
+			}
+			failureAssertions, err := assertion.ParseAssertions(failureOn, 1)
+			if err != nil {
+				return err
+			}
+
 			return runWithSignals(func(ctx context.Context) error {
-				err := client.Run(ctx, client.Config{ServerURL: serverURL})
+				err := client.Run(ctx, client.Config{
+					ServerURL:         serverURL,
+					Events:            events,
+					SuccessAssertions: successAssertions,
+					FailureAssertions: failureAssertions,
+				})
 				if errors.Is(err, context.Canceled) {
 					return nil
 				}
@@ -91,6 +109,9 @@ func main() {
 		},
 	}
 	streamCmd.Flags().StringVar(&serverURL, "server", "ws://localhost:8080/ws", "WebSocket server URL")
+	streamCmd.Flags().StringArrayVar(&events, "event", nil, "Subscribe to GitHub event types")
+	streamCmd.Flags().StringArrayVar(&successOn, "success-on", nil, "Exit 0 when assertion matches")
+	streamCmd.Flags().StringArrayVar(&failureOn, "failure-on", nil, "Exit 1 when assertion matches")
 
 	rootCmd.AddCommand(serveCmd, streamCmd)
 
