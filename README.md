@@ -4,6 +4,20 @@
 
 Stream GitHub webhooks to your terminal as JSONL.
 
+## Install
+
+```bash
+go install github.com/kehao95/gh-pulse/cmd/gh-pulse@latest
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/kehao95/gh-pulse
+cd gh-pulse
+go build ./cmd/gh-pulse
+```
+
 ## Quick Start
 
 1. Pick a smee.io channel (any unique URL works):
@@ -21,6 +35,28 @@ Stream GitHub webhooks to your terminal as JSONL.
    ```
 
 That's it. No server, no registration, no tokens.
+
+## Testing
+
+Verify the full pipeline works:
+
+```bash
+# Terminal 1: Start streaming (pick any unique channel name)
+./gh-pulse stream --url https://smee.io/test-gh-pulse-$(whoami) --timeout 30
+
+# Terminal 2: Send a test webhook
+curl -X POST https://smee.io/test-gh-pulse-$(whoami) \
+  -H "Content-Type: application/json" \
+  -H "X-GitHub-Event: push" \
+  -H "X-GitHub-Delivery: test-123" \
+  -d '{"ref":"refs/heads/main","commits":[]}'
+```
+
+Terminal 1 should output:
+
+```json
+{"type":"event","event":"push","delivery_id":"test-123","payload":{"ref":"refs/heads/main","commits":[]}}
+```
 
 ## Commands
 
