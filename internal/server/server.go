@@ -45,11 +45,20 @@ func Run(ctx context.Context, cfg Config) error {
 
 		event := r.Header.Get("X-GitHub-Event")
 		delivery := r.Header.Get("X-GitHub-Delivery")
+		payload, truncated, truncations, err := truncatePayloadIfNeeded(body)
+		if err != nil {
+			logger.Printf("payload truncation failed event=%q delivery=%q: %v", event, delivery, err)
+			payload = json.RawMessage(body)
+		}
+		if truncated {
+			logger.Printf("payload truncated event=%q delivery=%q bytes=%d fields=%s", event, delivery, len(body), truncationFields(truncations))
+		}
 		msg := message.EventMessage{
 			Type:       "event",
 			Event:      event,
 			DeliveryID: delivery,
-			Payload:    json.RawMessage(body),
+			Truncated:  truncated,
+			Payload:    payload,
 		}
 		encoded, err := json.Marshal(msg)
 		if err != nil {

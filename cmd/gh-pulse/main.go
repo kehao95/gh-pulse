@@ -83,6 +83,11 @@ func main() {
 	var successOn []string
 	var failureOn []string
 	var timeoutSeconds int
+	var captureServerURL string
+	var captureEvents []string
+	var captureSuccessOn []string
+	var captureFailureOn []string
+	var captureTimeoutSeconds int
 	streamCmd := &cobra.Command{
 		Use:   "stream",
 		Short: "Connect to the WebSocket stream",
@@ -118,7 +123,45 @@ func main() {
 	streamCmd.Flags().StringArrayVar(&failureOn, "failure-on", nil, "Exit 1 when assertion matches")
 	streamCmd.Flags().IntVar(&timeoutSeconds, "timeout", 0, "Exit 124 after timeout in seconds (0 = no timeout)")
 
-	rootCmd.AddCommand(serveCmd, streamCmd)
+	captureCmd := &cobra.Command{
+		Use:   "capture",
+		Short: "Buffer events and dump on exit",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(captureSuccessOn) == 0 && len(captureFailureOn) == 0 && captureTimeoutSeconds == 0 {
+				return fmt.Errorf("capture mode requires at least one exit condition (--success-on, --failure-on, or --timeout)")
+			}
+			successAssertions, err := assertion.ParseAssertions(captureSuccessOn, 0)
+			if err != nil {
+				return err
+			}
+			failureAssertions, err := assertion.ParseAssertions(captureFailureOn, 1)
+			if err != nil {
+				return err
+			}
+			timeout := time.Duration(captureTimeoutSeconds) * time.Second
+
+			return runWithSignals(func(ctx context.Context) error {
+				err := client.RunCapture(ctx, client.Config{
+					ServerURL:         captureServerURL,
+					Events:            captureEvents,
+					SuccessAssertions: successAssertions,
+					FailureAssertions: failureAssertions,
+					Timeout:           timeout,
+				})
+				if errors.Is(err, context.Canceled) {
+					return nil
+				}
+				return err
+			})
+		},
+	}
+	captureCmd.Flags().StringVar(&captureServerURL, "server", "ws://localhost:8080/ws", "WebSocket server URL")
+	captureCmd.Flags().StringArrayVar(&captureEvents, "event", nil, "Subscribe to GitHub event types")
+	captureCmd.Flags().StringArrayVar(&captureSuccessOn, "success-on", nil, "Exit 0 when assertion matches")
+	captureCmd.Flags().StringArrayVar(&captureFailureOn, "failure-on", nil, "Exit 1 when assertion matches")
+	captureCmd.Flags().IntVar(&captureTimeoutSeconds, "timeout", 0, "Exit 124 after timeout in seconds (0 = no timeout)")
+
+	rootCmd.AddCommand(serveCmd, streamCmd, captureCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		var exitErr interface{ ExitCode() int }

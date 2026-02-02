@@ -7,5 +7,6 @@ type EventMessage struct {
 	Type       string          `json:"type"`
 	Event      string          `json:"event"`
 	DeliveryID string          `json:"delivery_id"`
+	Truncated  bool            `json:"truncated"`
 	Payload    json.RawMessage `json:"payload"`
 }
