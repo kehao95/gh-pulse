@@ -1,79 +1,35 @@
 # gh-pulse
 
-GitHub. Spoken in JSON.
+**GitHub. Spoken in JSON.**
 
-[![Go](https://img.shields.io/badge/go-1.25%2B-00ADD8?style=flat-square&logo=go&logoColor=white)](https://golang.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![Status: Alpha](https://img.shields.io/badge/status-alpha-orange?style=flat-square)](#)
-
-## Overview
-
-gh-pulse is a tiny bridge that receives GitHub webhooks via smee.io and streams them to your terminal as JSONL over SSE. It solves the "how do I wait on GitHub state changes in a script" problem by turning webhook traffic into a remote, scriptable event stream with assertion-based exits.
-
-Use it to gate deploys on PR merges, run forensic replay of events, or pipe real-time GitHub activity into any CLI tool that speaks JSONL.
+Stream GitHub webhooks to your terminal as JSONL.
 
 ## Quick Start
 
-```bash
-go build ./cmd/gh-pulse
-SMEE_URL=$(curl -sL https://smee.io/new -o /dev/null -w '%{url_effective}')
-./gh-pulse stream --url "$SMEE_URL" --event pull_request
-```
+1. Pick a smee.io channel (any unique URL works):
+   ```bash
+   export SMEE_URL="https://smee.io/my-repo-name"
+   ```
 
-Send a test webhook to the smee channel:
+2. Configure GitHub webhook -> Settings -> Webhooks -> Add:
+   - Payload URL: `$SMEE_URL`
+   - Content type: `application/json`
 
-```bash
-curl -X POST "$SMEE_URL" \
-  -H "Content-Type: application/json" \
-  -H "X-GitHub-Event: pull_request" \
-  -H "X-GitHub-Delivery: test-123" \
-  -d '{"action":"opened"}'
-```
+3. Stream events:
+   ```bash
+   gh-pulse stream --url "$SMEE_URL"
+   ```
+
+That's it. No server, no registration, no tokens.
 
 ## Commands
 
-### gh-pulse stream
-
-Connect to the smee.io SSE stream and write JSONL events to stdout in real time.
-
-```bash
-gh-pulse stream [flags]
-
-Flags:
-  --url string           smee.io channel URL (required)
-  --event string         Subscribe to GitHub event types (repeatable)
-  --success-on string    Exit 0 when assertion matches (repeatable)
-  --failure-on string    Exit 1 when assertion matches (repeatable)
-  --timeout int          Exit 124 after timeout in seconds (0 = no timeout)
+```text
+gh-pulse stream --url <smee_url> [--event <event>] [--success-on <assertion>] [--failure-on <assertion>] [--timeout <seconds>]
+gh-pulse capture --url <smee_url> [--event <event>] [--success-on <assertion>] [--failure-on <assertion>] [--timeout <seconds>]
 ```
 
-Behavior:
-- If no `--event` is provided, all event types are streamed (filtering is local).
-- Assertions match against the JSON payload and exit the process immediately when they match.
-- Output is line-delimited JSON (`.jsonl`), one event per line.
-
-### gh-pulse capture
-
-Connect to the smee.io SSE stream, buffer events in memory, and dump the entire buffer on exit.
-
-```bash
-gh-pulse capture [flags]
-
-Flags:
-  --url string           smee.io channel URL (required)
-  --event string         Subscribe to GitHub event types (repeatable)
-  --success-on string    Exit 0 when assertion matches (repeatable)
-  --failure-on string    Exit 1 when assertion matches (repeatable)
-  --timeout int          Exit 124 after timeout in seconds (0 = no timeout)
-```
-
-Notes:
-- Capture requires at least one exit condition (`--success-on`, `--failure-on`, or `--timeout`).
-- The buffer warns at 100MB and hard-fails at 500MB.
-
-## Assertion Syntax
-
-Assertions are used with `--success-on` and `--failure-on` flags. They evaluate against the JSON payload of each event.
+## Assertions
 
 ```text
 path=value     # equality
@@ -81,15 +37,11 @@ path=~regex    # regex
 path exists    # existence
 ```
 
-Examples:
+Example:
 
 ```bash
---success-on "pull_request.merged=true"
---failure-on "pull_request.state=~closed"
---success-on "deployment_status.state exists"
+gh-pulse stream --url "$SMEE_URL" --success-on "event=push"
 ```
-
-Paths are dot-separated, and array indices are supported (e.g., `commits.0.author.name`).
 
 ## Exit Codes
 
@@ -103,108 +55,23 @@ Paths are dot-separated, and array indices are supported (e.g., `commits.0.autho
 
 ## Examples
 
-### Deploy & Wait (PRD Scenario A)
-
-Wait for a deployment to reach a healthy state before continuing.
+Wait for a deployment to succeed:
 
 ```bash
-./gh-pulse stream \
-  --url https://smee.io/your-channel \
+gh-pulse stream \
+  --url "$SMEE_URL" \
   --event deployment_status \
   --success-on "deployment_status.state=success" \
   --failure-on "deployment_status.state=~(failure|error)" \
   --timeout 1800
 ```
 
-### Forensic Analysis (PRD Scenario B)
-
-Capture and replay a burst of events for postmortem analysis.
+Capture a burst of events for review:
 
 ```bash
-./gh-pulse capture \
-  --url https://smee.io/your-channel \
+gh-pulse capture \
+  --url "$SMEE_URL" \
   --event push \
   --event pull_request \
-  --event workflow_run \
   --timeout 300 > events.jsonl
 ```
-
-Then inspect with jq:
-
-```bash
-jq -r '.event + " " + .delivery_id' events.jsonl | head
-```
-
-## Real GitHub Setup
-
-End-to-end test with a real GitHub webhook using smee.io.
-
-### Build
-
-```bash
-go build ./cmd/gh-pulse
-```
-
-### Create smee channel
-
-```bash
-SMEE_URL=$(curl -sL https://smee.io/new -o /dev/null -w '%{url_effective}')
-echo "Channel: $SMEE_URL"
-```
-
-### Create GitHub webhook
-
-```bash
-gh api repos/<owner>/<repo>/hooks --method POST \
-  -f url="$SMEE_URL" \
-  -f content_type="json" \
-  -F events[]="push" \
-  -F events[]="pull_request" \
-  -F active=true
-```
-
-Save the `id` from the response so you can delete it later.
-
-### Connect client
-
-```bash
-./gh-pulse stream --url "$SMEE_URL" --event push --event pull_request > events.jsonl 2>status.log
-```
-
-### Trigger event
-
-Create a small commit, open a PR, or file an issue in the target repo.
-
-### Verify output
-
-```bash
-tail -n 1 events.jsonl
-```
-
-### Cleanup webhook
-
-```bash
-gh api repos/<owner>/<repo>/hooks/<webhook-id> --method DELETE
-```
-
-## Output Schema
-
-gh-pulse emits JSONL where each line is a JSON envelope with the GitHub event payload.
-
-```json
-{
-  "type": "event",
-  "event": "pull_request",
-  "delivery_id": "test-123",
-  "truncated": false,
-  "payload": {
-    "action": "opened",
-    "pull_request": {
-      "number": 42
-    }
-  }
-}
-```
-
-Notes:
-- `payload` is the original GitHub webhook JSON.
